@@ -1,105 +1,102 @@
-# USAGE
-# python real_time_object_detection.py --prototxt MobileNetSSD_deploy.prototxt.txt --model MobileNetSSD_deploy.caffemodel
-
-# import the necessary packages
+#!/usr/bin/env python3
 from imutils.video import VideoStream
-from imutils.video import FPS
 import numpy as np
+import dropbox
+import json
 import argparse
 import imutils
+import datetime
 import time
 import cv2
+import os
 
-# construct the argument parse and parse the arguments
 ap = argparse.ArgumentParser()
-ap.add_argument("-p", "--prototxt", required=True,
-	help="path to Caffe 'deploy' prototxt file")
-ap.add_argument("-m", "--model", required=True,
-	help="path to Caffe pre-trained model")
-ap.add_argument("-c", "--confidence", type=float, default=0.2,
+
+ap.add_argument("-c", "--confidence", type=float, default=0.4,
 	help="minimum probability to filter weak detections")
+ap.add_argument("-cl", "--classes", required=True, nargs='*',
+                help="table of warning classes")
 args = vars(ap.parse_args())
 
-# initialize the list of class labels MobileNet SSD was trained to
-# detect, then generate a set of bounding box colors for each class
+conf = json.load(open("/home/pi/Desktop/pi-object-detection/conf.json"))
+
+client = dropbox.Dropbox(conf["dropbox_token"])
+print("[SUCCESS] dropbox account linked")
+
+# initialize the list of class labels MobileNet SSD was trained to detect
 CLASSES = ["background", "aeroplane", "bicycle", "bird", "boat",
 	"bottle", "bus", "car", "cat", "chair", "cow", "diningtable",
 	"dog", "horse", "motorbike", "person", "pottedplant", "sheep",
 	"sofa", "train", "tvmonitor"]
-COLORS = np.random.uniform(0, 255, size=(len(CLASSES), 3))
 
-WARNING = ["person", "car"]
+# initialize list of classes chosen to be suspicious
+WARNING = args["classes"]
+net = cv2.dnn.readNetFromCaffe("MobileNetSSD_deploy.prototxt.txt",
+                               "MobileNetSSD_deploy.caffemodel")
 
-# load our serialized model from disk
-print("[INFO] loading model...")
-net = cv2.dnn.readNetFromCaffe(args["prototxt"], args["model"])
-
-# initialize the video stream, allow the cammera sensor to warmup,
-# and initialize the FPS counter
-print("[INFO] starting video stream...")
+# initialize the video stream 
 vs = VideoStream(src=0).start()
-# vs = VideoStream(usePiCamera=True).start()
 time.sleep(2.0)
-fps = FPS().start()
 
-# loop over the frames from the video stream
+# path to folder for photos
+path = conf["path_images"]
+detection_count = 0
+
 while True:
-	# grab the frame from the threaded video stream and resize it
-	# to have a maximum width of 400 pixels
-	frame = vs.read()
-	frame = imutils.resize(frame, width=400)
+        actual_count = detection_count
+	# grab the frame from the stream and resize it
+        frame = vs.read()
+        frame = imutils.resize(frame, width=400)
 
 	# grab the frame dimensions and convert it to a blob
-	(h, w) = frame.shape[:2]
-	blob = cv2.dnn.blobFromImage(cv2.resize(frame, (300, 300)),
+        (h, w) = frame.shape[:2]
+        blob = cv2.dnn.blobFromImage(cv2.resize(frame, (300, 300)),
 		0.007843, (300, 300), 127.5)
 
-	# pass the blob through the network and obtain the detections and
-	# predictions
-	net.setInput(blob)
-	detections = net.forward()
+	# pass the blob through the network and obtain the detections and predictions
+        net.setInput(blob)
+        detections = net.forward()
+	
+        timestamp = datetime.datetime.now()
+        
 
 	# loop over the detections
-	for i in np.arange(0, detections.shape[2]):
-		# extract the confidence (i.e., probability) associated with
-		# the prediction
-		confidence = detections[0, 0, i, 2]
+        for i in np.arange(0, detections.shape[2]):
+		# extract the confidence (i.e., probability) associated with the prediction
+                confidence = detections[0, 0, i, 2]
 
-		# filter out weak detections by ensuring the `confidence` is greater than the minimum confidence
-		if confidence > args["confidence"]:
-			# extract the index of the class label from the `detections`, then compute the (x, y)-coordinates of
-			# the bounding box for the object
-			idx = int(detections[0, 0, i, 1])
-			box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
-			(startX, startY, endX, endY) = box.astype("int")
+		# filter out weak detections
+                if confidence > args["confidence"]:
+			# extract the index of the class label from the `detections`
+                        idx = int(detections[0, 0, i, 1])
 
-			# draw the prediction on the frame
-			#label = "{}: {:.2f}%".format(CLASSES[idx],
-			#	confidence * 100)
-			#cv2.rectangle(frame, (startX, startY), (endX, endY),
-			#	COLORS[idx], 2)
-			#y = startY - 15 if startY - 15 > 15 else startY + 15
-			#cv2.putText(frame, label, (startX, y),
-			#	cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLORS[idx], 2)
+                        if CLASSES[idx] in WARNING:
+                            print("Detected " + CLASSES[idx] + " count: " + str(actual_count))
+                            if actual_count == detection_count:
+                                actual_count += 1
 
-			if (CLASSES[idx] in WARNING):
-				print("Detected " + CLASSES[idx] + "!")
-
+                            if actual_count > conf["min_frames"]:
+                                ts = timestamp.strftime("%d%B%Y%I:%M:%S%p")
+                                print("Warning! Detected " + CLASSES[idx] + "! Saving photo")
+                                write_name = str(CLASSES[idx] + ts) + '.jpg'
+                                abs_path = os.path.join(os.getcwd(), path, write_name)
+                                cv2.imwrite(abs_path, frame)
+                                path_drop = "/{base_path}/{name}".format(base_path=conf["dropbox_path"], name = write_name)
+                                client.files_upload(open(abs_path, "rb").read(), path_drop)
+                                detection_count = 0
+                                actual_count = 0
+                             
 	# show the output frame
-	cv2.imshow("Frame", frame)
-	key = cv2.waitKey(1) & 0xFF
+        if actual_count == detection_count:
+            detection_count = 0
+            actual_count = 0
+        detection_count = actual_count
+            
+        cv2.imshow("Frame", frame)
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord("q"):
+                break
 
-	# if the `q` key was pressed, break from the loop
-	if key == ord("q"):
-		break
-
-	# update the FPS counter
-	fps.update()
-
-# stop the timer and display FPS information
-fps.stop()
-print("[INFO] elapsed time: {:.2f}".format(fps.elapsed()))
-print("[INFO] approx. FPS: {:.2f}".format(fps.fps()))
 
 # do a bit of cleanup
 cv2.destroyAllWindows()
